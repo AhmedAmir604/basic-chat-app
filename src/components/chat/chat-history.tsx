@@ -1,62 +1,56 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { format } from "date-fns";
-import { supabase } from "@/src/lib/supabase";
-import { useSocket } from "@/src/lib/socket";
+import { Message, chatHelpers } from "@/src/lib/supabase";
 import { ChatMessage } from "@/src/components/chat/chat-message";
 
-interface Message {
-  id: string;
-  chat_id: string;
-  sender_id: string;
-  content: string;
-  created_at: string;
-}
-
-export function ChatHistory({ chatId, userId }: { chatId: string; userId: string }) {
+export function ChatHistory({ roomId }: { roomId: string }) {
   const [messages, setMessages] = useState<Message[]>([]);
+  const [loading, setLoading] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const socket = useSocket();
 
   useEffect(() => {
     // Fetch messages from Supabase
     const fetchMessages = async () => {
-      const { data, error } = await supabase
-        .from("messages")
-        .select("*")
-        .eq("chat_id", chatId)
-        .order("created_at");
-      
-      if (data) {
-        setMessages(data);
+      setLoading(true);
+      try {
+        const { data, error } = await chatHelpers.getMessages(roomId);
+        if (error) throw error;
+        setMessages(data || []);
+      } catch (error) {
+        console.error('Error fetching messages:', error);
+      } finally {
+        setLoading(false);
       }
     };
 
     fetchMessages();
 
-    // Listen for new messages via socket
-    const handleNewMessage = (message: Message) => {
-      if (message.chat_id === chatId) {
-        setMessages((prev: Message[]) => [...prev, message]);
+    // Subscribe to real-time updates
+    const subscription = chatHelpers.subscribeToMessages(roomId, (payload) => {
+      if (payload.eventType === 'INSERT') {
+        const newMessage = payload.new as Message;
+        setMessages((prev) => [...prev, newMessage]);
       }
-    };
-
-    if (socket) {
-      socket.on("new_message", handleNewMessage);
-    }
+    });
 
     return () => {
-      if (socket) {
-        socket.off("new_message", handleNewMessage);
-      }
+      subscription.unsubscribe();
     };
-  }, [chatId, socket]);
+  }, [roomId]);
 
   // Scroll to bottom when messages change
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900"></div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -64,9 +58,13 @@ export function ChatHistory({ chatId, userId }: { chatId: string; userId: string
         <ChatMessage
           key={message.id}
           message={message}
-          isOwn={message.sender_id === userId}
         />
       ))}
+      {messages.length === 0 && (
+        <div className="text-center text-muted-foreground py-8">
+          No messages yet. Start the conversation!
+        </div>
+      )}
       <div ref={bottomRef} />
     </div>
   );
