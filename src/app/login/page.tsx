@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useAuth } from "@/src/lib/auth-context";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,27 +14,45 @@ export default function LoginPage() {
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const router = useRouter();
-  const { signIn, signUp } = useAuth();
+  const { signIn, signUp, user } = useAuth();
+
+  // Redirect if user is already authenticated
+  useEffect(() => {
+    if (user) {
+      router.push("/dashboard");
+    }
+  }, [user, router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setError("");
+
     try {
       if (isSignUp) {
-        await signUp(email, password, name);
-        alert("Please check your email to confirm your account!");
+        const result = await signUp(email, password, name);
+        
+        if (result.user?.email_confirmed_at) {
+          // User is confirmed immediately, will redirect via useEffect
+        } else {
+          // User needs email confirmation
+          setIsLoading(false);
+          alert("Please check your email to confirm your account!");
+          return;
+        }
       } else {
         const result = await signIn(email, password);
-        console.log("Sign in result:", result);
-        router.push("/(dashboard)");
+        
+        if (result.user) {
+          // Authentication successful, will redirect via useEffect when user state updates
+        }
       }
     } catch (error) {
-      console.error("Authentication error:", error);
       setError(error instanceof Error ? error.message : "An unknown error occurred");
-    } finally {
       setIsLoading(false);
     }
+    // Don't set loading to false here if authentication was successful
+    // Let the useEffect handle the redirect and loading will be managed by the redirect
   };
 
   return (
@@ -88,14 +106,18 @@ export default function LoginPage() {
             className="w-full h-16 text-xl font-medium rounded-lg transition-colors"
             disabled={isLoading}
           >
-            {isLoading ? "..." : isSignUp ? "Sign Up" : "Sign In"}
+            {isLoading ? "Signing in..." : isSignUp ? "Sign Up" : "Sign In"}
           </Button>
         </form>
 
         <button
           type="button"
-          onClick={() => setIsSignUp(!isSignUp)}
+          onClick={() => {
+            setIsSignUp(!isSignUp);
+            setError("");
+          }}
           className="mt-8 text-base text-muted-foreground hover:text-foreground transition-colors"
+          disabled={isLoading}
         >
           {isSignUp 
             ? "Already have an account? Sign in" 
