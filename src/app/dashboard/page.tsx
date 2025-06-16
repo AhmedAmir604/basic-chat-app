@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/src/lib/auth-context";
 import { supabase } from "@/src/lib/supabase";
 import { createRealtimeChat, RealtimeChat, Message as RealtimeMessage } from "@/src/lib/realtime";
@@ -48,88 +48,21 @@ export default function DashboardPage() {
   const typingTimeout = useRef<NodeJS.Timeout | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Initialize realtime chat
-  useEffect(() => {
-    if (user?.id) {
-      realtimeChat.current = createRealtimeChat(user.id);
-      console.log(realtimeChat.current)
-      // Set user online when component mounts
-      realtimeChat.current.setPresence(true);
-      
-      // Set user offline when component unmounts
-      return () => {
-        if (realtimeChat.current) {
-          realtimeChat.current.setPresence(false);
-          realtimeChat.current.unsubscribeAll();
-        }
-      };
-    }
-  }, [user?.id]);
-
-  useEffect(() => {
-    if (user) {
-      loadConversations();
-    }
-  }, [user]);
-
-  useEffect(() => {
-    if (activeConversation && user?.id) {
-      loadMessages(activeConversation);
-      subscribeToRealtimeMessages();
-      subscribeToTypingIndicators();
-    }
-    
-    return () => {
-      if (realtimeChat.current) {
-        realtimeChat.current.unsubscribeAll();
-      }
-    };
-  }, [activeConversation, user?.id]);
-
-  // Auto scroll to bottom when new messages arrive
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
-
-  const scrollToBottom = () => {
+  // Memoized function to scroll to bottom
+  const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
+  }, []);
 
-  const subscribeToRealtimeMessages = () => {
-    if (!realtimeChat.current || !activeConversation) return;
-
-    realtimeChat.current.subscribeToMessages(activeConversation, (message: RealtimeMessage) => {
-      setMessages(prev => {
-        // Check if message already exists (avoid duplicates)
-        const exists = prev.find(m => m.id === message.id);
-        if (exists) {
-          // Update existing message (for status updates)
-          return prev.map(m => m.id === message.id ? { ...m, ...message } : m);
-        }
-        // Add new message
-        return [...prev, message];
-      });
-      
-      // Update conversations list with latest message
-      loadConversations();
-    });
-  };
-
-  const subscribeToTypingIndicators = () => {
-    if (!realtimeChat.current || !activeConversation) return;
-
-    realtimeChat.current.subscribeToTyping(activeConversation, (typing: boolean) => {
-      setPartnerTyping(typing);
-    });
-  };
-
-  const loadConversations = async () => {
+  // Memoized function to load conversations
+  const loadConversations = useCallback(async () => {
+    if (!user?.id) return;
+    
     try {
       // Get all messages where user is sender or receiver
       const { data: messagesData, error } = await supabase
         .from('messages')
         .select('*')
-        .or(`user_id.eq.${user?.id},receiver_id.eq.${user?.id}`)
+        .or(`user_id.eq.${user.id},receiver_id.eq.${user.id}`)
         .order('created_at', { ascending: false });
 
       if (error) throw error;
@@ -137,11 +70,17 @@ export default function DashboardPage() {
       // Get unique user IDs that this user has conversations with
       const partnerIds = new Set<string>();
       messagesData?.forEach((msg: any) => {
-        const partnerId = msg.user_id === user?.id ? msg.receiver_id : msg.user_id;
+        const partnerId = msg.user_id === user.id ? msg.receiver_id : msg.user_id;
         if (partnerId) {
           partnerIds.add(partnerId);
         }
       });
+
+      if (partnerIds.size === 0) {
+        setConversations([]);
+        setLoading(false);
+        return;
+      }
 
       // Get profiles for all conversation partners
       const { data: profiles, error: profilesError } = await supabase
@@ -169,7 +108,7 @@ export default function DashboardPage() {
       const presenceMap = new Map(presenceData?.map(p => [p.user_id, p]) || []);
 
       messagesData?.forEach((msg: any) => {
-        const isFromMe = msg.user_id === user?.id;
+        const isFromMe = msg.user_id === user.id;
         const partnerId = isFromMe ? msg.receiver_id : msg.user_id;
         const partnerProfile = profileMap.get(partnerId);
         const partnerPresence = presenceMap.get(partnerId);
@@ -189,26 +128,209 @@ export default function DashboardPage() {
 
       setConversations(Array.from(conversationMap.values()));
     } catch (error) {
-      // Handle conversation loading error silently
+      console.error('Error loading conversations:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, [user?.id]);
 
-  const loadMessages = async (partnerId: string) => {
+  // Memoized function to load messages
+  const loadMessages = useCallback(async (partnerId: string) => {
+    if (!user?.id) return;
+    
     try {
       const { data, error } = await supabase
         .from('messages')
         .select('*')
-        .or(`and(user_id.eq.${user?.id},receiver_id.eq.${partnerId}),and(user_id.eq.${partnerId},receiver_id.eq.${user?.id})`)
+        .or(`and(user_id.eq.${user.id},receiver_id.eq.${partnerId}),and(user_id.eq.${partnerId},receiver_id.eq.${user.id})`)
         .order('created_at', { ascending: true });
 
       if (error) throw error;
       setMessages(data || []);
     } catch (error) {
-      // Handle message loading error silently
+      console.error('Error loading messages:', error);
     }
-  };
+  }, [user?.id]);
+
+  // Memoized function to subscribe to realtime messages
+  const subscribeToRealtimeMessages = useCallback(() => {
+    if (!realtimeChat.current || !activeConversation) return;
+
+    realtimeChat.current.subscribeToMessages(activeConversation, (message: RealtimeMessage) => {
+      setMessages(prev => {
+        // Check if message already exists (avoid duplicates)
+        const exists = prev.find(m => m.id === message.id);
+        if (exists) {
+          // Update existing message (for status updates)
+          return prev.map(m => m.id === message.id ? { ...m, ...message } : m);
+        }
+        // Add new message
+        return [...prev, message];
+      });
+      
+      // Update conversation list only when necessary
+      setConversations(prev => 
+        prev.map(conv => 
+          conv.id === message.user_id || conv.id === message.receiver_id
+            ? { ...conv, last_message: message.content, last_message_time: message.created_at }
+            : conv
+        )
+      );
+    });
+  }, [activeConversation]);
+
+  // Memoized function to subscribe to typing indicators
+  const subscribeToTypingIndicators = useCallback(() => {
+    if (!realtimeChat.current || !activeConversation) return;
+
+    realtimeChat.current.subscribeToTyping(activeConversation, (typing: boolean) => {
+      setPartnerTyping(typing);
+    });
+  }, [activeConversation]);
+
+  // Helper function to get profile data for a user
+  const getProfileData = useCallback(async (userId: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, email, full_name')
+        .eq('id', userId)
+        .single();
+      
+      if (error) throw error;
+      return data;
+    } catch (error) {
+      console.error('Error fetching profile:', error);
+      return null;
+    }
+  }, []);
+
+  // Handle new message from incoming subscription (for conversation list updates)
+  const handleGlobalNewMessage = useCallback(async (message: RealtimeMessage) => {
+    console.log('Incoming message received:', message);
+    
+    // If this message is for the active conversation, update messages
+    if (activeConversation && message.user_id === activeConversation) {
+      setMessages(prev => {
+        const exists = prev.find(m => m.id === message.id);
+        if (exists) return prev;
+        return [...prev, message];
+      });
+    }
+    
+    // Update conversation list
+    setConversations(prev => {
+      const senderId = message.user_id;
+      const existingConversationIndex = prev.findIndex(conv => conv.id === senderId);
+      
+      if (existingConversationIndex >= 0) {
+        // Update existing conversation
+        const updatedConversations = [...prev];
+        updatedConversations[existingConversationIndex] = {
+          ...updatedConversations[existingConversationIndex],
+          last_message: message.content,
+          last_message_time: message.created_at
+        };
+        return updatedConversations;
+      } else {
+        // Add new conversation - need to fetch sender's profile
+        getProfileData(senderId).then(profile => {
+          if (profile) {
+            setConversations(currentConversations => {
+              // Check if conversation was already added by another async operation
+              const alreadyExists = currentConversations.find(conv => conv.id === senderId);
+              if (alreadyExists) return currentConversations;
+              
+              return [{
+                id: senderId,
+                participant_email: profile.email,
+                participant_name: profile.full_name || '',
+                last_message: message.content,
+                last_message_time: message.created_at,
+                unread_count: 0,
+                is_online: false
+              }, ...currentConversations];
+            });
+          }
+        });
+        
+        return prev; // Return current state while profile is being fetched
+      }
+    });
+  }, [activeConversation, getProfileData]);
+
+  // Initialize realtime chat
+  useEffect(() => {
+    if (user?.id) {
+      realtimeChat.current = createRealtimeChat(user.id);
+      console.log(realtimeChat.current)
+      // Set user online when component mounts
+      realtimeChat.current.setPresence(true);
+      
+      // Subscribe to incoming messages (where current user is receiver)
+      realtimeChat.current.subscribeToIncomingMessages(handleGlobalNewMessage);
+      
+      // Subscribe to sent message status updates
+      realtimeChat.current.subscribeToSentMessages((message) => {
+        console.log('Sent message status update:', message);
+        // Update message status if it's in the current conversation
+        if (activeConversation && 
+            (message.user_id === user.id && message.receiver_id === activeConversation)) {
+          setMessages(prev => 
+            prev.map(m => m.id === message.id ? { ...m, ...message } : m)
+          );
+        }
+      });
+      
+      // Subscribe to user presence updates globally
+      realtimeChat.current.subscribeToPresence((presence) => {
+        console.log('Presence update:', presence);
+        // Update conversation list with presence info
+        setConversations(prev => 
+          prev.map(conv => 
+            conv.id === presence.user_id 
+              ? { ...conv, is_online: presence.is_online }
+              : conv
+          )
+        );
+      });
+      
+      // Set user offline when component unmounts
+      return () => {
+        if (realtimeChat.current) {
+          realtimeChat.current.setPresence(false);
+          realtimeChat.current.unsubscribeAll();
+        }
+      };
+    }
+  }, [user?.id, handleGlobalNewMessage, activeConversation]);
+
+  // Load conversations when user is available
+  useEffect(() => {
+    if (user?.id) {
+      loadConversations();
+    }
+  }, [user?.id, loadConversations]);
+
+  // Handle active conversation changes
+  useEffect(() => {
+    if (activeConversation && user?.id) {
+      loadMessages(activeConversation);
+      subscribeToRealtimeMessages();
+      subscribeToTypingIndicators();
+    }
+    
+    return () => {
+      if (realtimeChat.current) {
+        realtimeChat.current.unsubscribeAll();
+      }
+    };
+  }, [activeConversation, user?.id, loadMessages, subscribeToRealtimeMessages, subscribeToTypingIndicators]);
+
+  // Auto scroll to bottom when new messages arrive
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, scrollToBottom]);
 
   const sendMessage = async () => {
     if (!newMessage.trim() || !activeConversation || !user?.id || !realtimeChat.current) return;
@@ -229,8 +351,6 @@ export default function DashboardPage() {
     setMessages(prev => [...prev, optimisticMessage]);
 
     // Send through realtime chat
-    
-
     const sentMessage = await realtimeChat.current.sendMessage(activeConversation, messageContent);
     if (sentMessage) {
       // Replace optimistic message with real one
@@ -246,11 +366,11 @@ export default function DashboardPage() {
 
     // Stop typing indicator
     handleTyping(false);
-    loadConversations();
   };
 
   const handleTyping = (typing: boolean) => {
     if (!realtimeChat.current || !activeConversation) return;
+    console.log(isTyping)
 
     if (typing) {
       // Clear existing timeout
@@ -261,6 +381,7 @@ export default function DashboardPage() {
       // Set typing indicator
       if (!isTyping) {
         setIsTyping(true);
+        console.log(isTyping)
         realtimeChat.current.setTyping(activeConversation, true);
       }
       
@@ -336,7 +457,7 @@ export default function DashboardPage() {
         }, ...prev]);
       }
     } catch (error) {
-      // Handle conversation start error silently
+      console.error('Error starting conversation:', error);
     }
   };
 

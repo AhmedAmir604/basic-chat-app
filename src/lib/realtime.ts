@@ -33,16 +33,64 @@ export class RealtimeChat {
     this.currentUserId = userId;
   }
 
-  // 1. Subscribe to new messages for a specific conversation
-  subscribeToMessages(
-    partnerId: string, 
+  // 1. Subscribe to messages WHERE CURRENT USER IS RECEIVER (efficient + reliable)
+  subscribeToIncomingMessages(
     onNewMessage: (message: Message) => void
   ) {
-    // Unsubscribe from previous channel if exists
+    const incomingChannel = supabase
+      .channel(`incoming-${this.currentUserId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+          filter: `receiver_id.eq.${this.currentUserId}` // Simple filter - very reliable
+        },
+        (payload) => {
+          onNewMessage(payload.new as Message);
+        }
+      )
+      .subscribe();
+
+    return incomingChannel;
+  }
+
+  // 2. Subscribe to messages WHERE CURRENT USER IS SENDER (for status updates)
+  subscribeToSentMessages(
+    onMessageUpdate: (message: Message) => void
+  ) {
+    const sentChannel = supabase
+      .channel(`sent-${this.currentUserId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'messages',
+          filter: `user_id.eq.${this.currentUserId}` // Simple filter - very reliable
+        },
+        (payload) => {
+          onMessageUpdate(payload.new as Message);
+        }
+      )
+      .subscribe();
+
+    return sentChannel;
+  }
+
+  // 2. Subscribe to new messages for a specific conversation
+  subscribeToMessages(
+    partnerId: string,
+    onNewMessage: (message: Message) => void
+  ) {
+    // Clean up any previous subscription
     if (this.messageChannel) {
       this.messageChannel.unsubscribe();
+      this.messageChannel = null;
     }
-
+  
+    // Use a single subscription and filter in JS
     this.messageChannel = supabase
       .channel(`messages-${this.currentUserId}-${partnerId}`)
       .on(
@@ -51,10 +99,17 @@ export class RealtimeChat {
           event: 'INSERT',
           schema: 'public',
           table: 'messages',
-          filter: `or(and(user_id.eq.${this.currentUserId},receiver_id.eq.${partnerId}),and(user_id.eq.${partnerId},receiver_id.eq.${this.currentUserId}))`
         },
         (payload) => {
-          onNewMessage(payload.new as Message);
+          const message = payload.new as Message;
+  
+          const isForThisConversation =
+            (message.user_id === this.currentUserId && message.receiver_id === partnerId) ||
+            (message.user_id === partnerId && message.receiver_id === this.currentUserId);
+  
+          if (isForThisConversation) {
+            onNewMessage(message);
+          }
         }
       )
       .on(
@@ -63,24 +118,33 @@ export class RealtimeChat {
           event: 'UPDATE',
           schema: 'public',
           table: 'messages',
-          filter: `or(and(user_id.eq.${this.currentUserId},receiver_id.eq.${partnerId}),and(user_id.eq.${partnerId},receiver_id.eq.${this.currentUserId}))`
         },
         (payload) => {
-          onNewMessage(payload.new as Message);
+          const message = payload.new as Message;
+  
+          const isForThisConversation =
+            (message.user_id === this.currentUserId && message.receiver_id === partnerId) ||
+            (message.user_id === partnerId && message.receiver_id === this.currentUserId);
+  
+          if (isForThisConversation) {
+            onNewMessage(message);
+          }
         }
       )
       .subscribe();
-
+  
     return this.messageChannel;
   }
+  
 
-  // 2. Subscribe to typing indicators for a conversation
+  // 4. Subscribe to typing indicators - TARGET SPECIFIC USER
   subscribeToTyping(
     partnerId: string,
     onTypingChange: (isTyping: boolean) => void
   ) {
     if (this.typingChannel) {
       this.typingChannel.unsubscribe();
+      this.typingChannel = null;
     }
 
     this.typingChannel = supabase
@@ -91,11 +155,14 @@ export class RealtimeChat {
           event: '*',
           schema: 'public',
           table: 'typing_indicators',
-          filter: `and(user_id.eq.${partnerId},conversation_partner_id.eq.${this.currentUserId})`
+          filter: `user_id.eq.${partnerId}` // Simple filter targeting specific user
         },
         (payload) => {
-          if (payload.new) {
-            onTypingChange((payload.new as TypingIndicator).is_typing);
+          const typingData = payload.new as TypingIndicator;
+          
+          // Only need to check conversation partner (user_id already filtered)
+          if (typingData.conversation_partner_id === this.currentUserId) {
+            onTypingChange(typingData.is_typing);
           }
         }
       )
@@ -104,14 +171,15 @@ export class RealtimeChat {
     return this.typingChannel;
   }
 
-  // 3. Subscribe to user presence
+  // 3. Subscribe to user presence - GLOBAL approach
   subscribeToPresence(onPresenceChange: (presence: UserPresence) => void) {
     if (this.presenceChannel) {
       this.presenceChannel.unsubscribe();
+      this.presenceChannel = null;
     }
 
     this.presenceChannel = supabase
-      .channel('user-presence')
+      .channel('user-presence-global')
       .on(
         'postgres_changes',
         {
@@ -121,7 +189,9 @@ export class RealtimeChat {
         },
         (payload) => {
           if (payload.new) {
-            onPresenceChange(payload.new as UserPresence);
+            const presenceData = payload.new as UserPresence;
+            // Let the client decide what to do with all presence updates
+            onPresenceChange(presenceData);
           }
         }
       )
@@ -133,7 +203,6 @@ export class RealtimeChat {
   // 4. Send message with optimistic update
   async sendMessage(receiverId: string, content: string): Promise<Message | null> {
     try {
-        console.log("sending message")
       const { data, error } = await supabase
         .from('messages')
         .insert({
@@ -145,6 +214,7 @@ export class RealtimeChat {
         .select()
         .single();
       if (error) throw error;
+      console.log(data, error);
       return data as Message;
     } catch (error) {
       return null;
