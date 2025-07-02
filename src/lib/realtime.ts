@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { supabase } from '@/integrations/supabase/client';
 import { RealtimeChannel } from '@supabase/supabase-js';
 
 // Basic message structure - what each message looks like

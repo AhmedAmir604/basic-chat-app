@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, useState } from 'react';
 import { User, Session } from '@supabase/supabase-js';
-import { supabase } from './supabase';
+import { supabase } from '@/integrations/supabase/client';
 
 // Types for our database
 export type Profile = {

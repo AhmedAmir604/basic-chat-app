@@ -2,12 +2,12 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/src/lib/auth-context";
-import { supabase } from "@/src/lib/supabase";
 import { createRealtimeChat, RealtimeChat, Message } from "@/src/lib/realtime";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ThemeToggle } from "@/src/components/theme/theme-toggle";
 import { Plus, MessageCircle } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
 
 // What each conversation looks like in the sidebar
 interface Conversation {
