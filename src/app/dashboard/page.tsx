@@ -3,86 +3,76 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAuth } from "@/src/lib/auth-context";
 import { supabase } from "@/src/lib/supabase";
-import { createRealtimeChat, RealtimeChat, Message as RealtimeMessage } from "@/src/lib/realtime";
+import { createRealtimeChat, RealtimeChat, Message } from "@/src/lib/realtime";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ThemeToggle } from "@/src/components/theme/theme-toggle";
-import { Search, Plus, MessageCircle, Circle } from "lucide-react";
+import { Plus, MessageCircle } from "lucide-react";
 
+// What each conversation looks like in the sidebar
 interface Conversation {
-  id: string;
-  participant_email: string;
-  participant_name?: string;
-  last_message?: string;
-  last_message_time?: string;
-  unread_count?: number;
-  is_online?: boolean;
-}
-
-interface Message {
-  id: string;
-  user_id: string;
-  receiver_id: string;
-  content: string;
-  status?: 'sent' | 'delivered' | 'read';
-  created_at: string;
-  read_at?: string;
-  sender_email?: string;
-  receiver_email?: string;
+  id: string;                    // the other person's user ID
+  participant_email: string;     // their email address
+  participant_name?: string;     // their display name (optional)
+  last_message?: string;         // the most recent message
+  last_message_time?: string;    // when the last message was sent
 }
 
 export default function DashboardPage() {
+  // Get the current logged-in user information
   const { user, profile, signOut } = useAuth();
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeConversation, setActiveConversation] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [newMessage, setNewMessage] = useState("");
-  const [searchEmail, setSearchEmail] = useState("");
-  const [showNewChat, setShowNewChat] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [isTyping, setIsTyping] = useState(false);
-  const [partnerTyping, setPartnerTyping] = useState(false);
   
-  // Realtime chat instance
+  // State variables - these hold our app's data
+  const [conversations, setConversations] = useState<Conversation[]>([]);     // list of all conversations
+  const [activeConversation, setActiveConversation] = useState<string | null>(null);  // which conversation is open
+  const [messages, setMessages] = useState<Message[]>([]);                   // messages in the current conversation
+  const [newMessage, setNewMessage] = useState("");                          // what the user is typing
+  const [searchEmail, setSearchEmail] = useState("");                        // email to start new chat with
+  const [showNewChat, setShowNewChat] = useState(false);                     // whether to show new chat form
+  const [loading, setLoading] = useState(true);                              // whether we're still loading data
+  
+  // References for real-time chat and auto-scrolling
   const realtimeChat = useRef<RealtimeChat | null>(null);
-  const typingTimeout = useRef<NodeJS.Timeout | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Memoized function to scroll to bottom
+  // Function to scroll to the bottom of messages (so new messages are visible)
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, []);
 
-  // Memoized function to load conversations
+  // Load all conversations when the app starts
   const loadConversations = useCallback(async () => {
     if (!user?.id) return;
     
     try {
-      // Get all messages where user is sender or receiver
+      // Get all messages where current user is involved (either sending or receiving)
       const { data: messagesData, error } = await supabase
         .from('messages')
         .select('*')
-        .or(`user_id.eq.${user.id},receiver_id.eq.${user.id}`)
-        .order('created_at', { ascending: false });
+        .or(`user_id.eq.${user.id},receiver_id.eq.${user.id}`)  // messages I sent OR received
+        .order('created_at', { ascending: false });              // newest first
 
       if (error) throw error;
 
-      // Get unique user IDs that this user has conversations with
+      // Find all unique people I've chatted with
       const partnerIds = new Set<string>();
-      messagesData?.forEach((msg: any) => {
+      messagesData?.forEach((msg) => {
+        // If I sent the message, the partner is the receiver
+        // If I received the message, the partner is the sender
         const partnerId = msg.user_id === user.id ? msg.receiver_id : msg.user_id;
         if (partnerId) {
           partnerIds.add(partnerId);
         }
       });
 
+      // If no conversations, just show empty state
       if (partnerIds.size === 0) {
         setConversations([]);
         setLoading(false);
         return;
       }
 
-      // Get profiles for all conversation partners
+      // Get profile information for all conversation partners
       const { data: profiles, error: profilesError } = await supabase
         .from('profiles')
         .select('id, email, full_name')
@@ -90,38 +80,24 @@ export default function DashboardPage() {
 
       if (profilesError) throw profilesError;
 
-      // Get presence data for all partners
-      const { data: presenceData, error: presenceError } = await supabase
-        .from('user_presence')
-        .select('user_id, is_online, last_seen')
-        .in('user_id', Array.from(partnerIds));
-
-      if (presenceError) {
-        // Handle presence error silently - not critical for basic functionality
-      }
-
-      // Create conversation map
+      // Create conversation list with last message info
       const conversationMap = new Map<string, Conversation>();
-      
-      // Create a map of user profiles for quick lookup
       const profileMap = new Map(profiles?.map(p => [p.id, p]) || []);
-      const presenceMap = new Map(presenceData?.map(p => [p.user_id, p]) || []);
 
-      messagesData?.forEach((msg: any) => {
+      // Go through all messages to build conversation summaries
+      messagesData?.forEach((msg) => {
         const isFromMe = msg.user_id === user.id;
         const partnerId = isFromMe ? msg.receiver_id : msg.user_id;
         const partnerProfile = profileMap.get(partnerId);
-        const partnerPresence = presenceMap.get(partnerId);
 
+        // Only create conversation entry if we haven't seen this partner yet
         if (partnerId && !conversationMap.has(partnerId)) {
           conversationMap.set(partnerId, {
             id: partnerId,
             participant_email: partnerProfile?.email || '',
             participant_name: partnerProfile?.full_name || '',
             last_message: msg.content,
-            last_message_time: msg.created_at,
-            unread_count: 0,
-            is_online: partnerPresence?.is_online || false
+            last_message_time: msg.created_at
           });
         }
       });
@@ -134,16 +110,17 @@ export default function DashboardPage() {
     }
   }, [user?.id]);
 
-  // Memoized function to load messages
+  // Load all messages for a specific conversation
   const loadMessages = useCallback(async (partnerId: string) => {
     if (!user?.id) return;
     
     try {
+      // Get all messages between me and this partner
       const { data, error } = await supabase
         .from('messages')
         .select('*')
         .or(`and(user_id.eq.${user.id},receiver_id.eq.${partnerId}),and(user_id.eq.${partnerId},receiver_id.eq.${user.id})`)
-        .order('created_at', { ascending: true });
+        .order('created_at', { ascending: true });  // oldest first for chat display
 
       if (error) throw error;
       setMessages(data || []);
@@ -152,23 +129,22 @@ export default function DashboardPage() {
     }
   }, [user?.id]);
 
-  // Memoized function to subscribe to realtime messages
+  // Set up real-time message listening for the current conversation
   const subscribeToRealtimeMessages = useCallback(() => {
     if (!realtimeChat.current || !activeConversation) return;
 
-    realtimeChat.current.subscribeToMessages(activeConversation, (message: RealtimeMessage) => {
+    // Listen for new messages in this conversation
+    realtimeChat.current.subscribeToMessages(activeConversation, (message: Message) => {
       setMessages(prev => {
-        // Check if message already exists (avoid duplicates)
+        // Check if we already have this message (avoid duplicates)
         const exists = prev.find(m => m.id === message.id);
-        if (exists) {
-          // Update existing message (for status updates)
-          return prev.map(m => m.id === message.id ? { ...m, ...message } : m);
-        }
-        // Add new message
+        if (exists) return prev;
+        
+        // Add the new message to our list
         return [...prev, message];
       });
       
-      // Update conversation list only when necessary
+      // Update the conversation list to show this as the latest message
       setConversations(prev => 
         prev.map(conv => 
           conv.id === message.user_id || conv.id === message.receiver_id
@@ -179,243 +155,73 @@ export default function DashboardPage() {
     });
   }, [activeConversation]);
 
-  // Memoized function to subscribe to typing indicators
-  const subscribeToTypingIndicators = useCallback(() => {
-    if (!realtimeChat.current || !activeConversation) return;
-
-    realtimeChat.current.subscribeToTyping(activeConversation, (typing: boolean) => {
-      setPartnerTyping(typing);
-    });
-  }, [activeConversation]);
-
-  // Helper function to get profile data for a user
-  const getProfileData = useCallback(async (userId: string) => {
-    try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('id, email, full_name')
-        .eq('id', userId)
-        .single();
-      
-      if (error) throw error;
-      return data;
-    } catch (error) {
-      console.error('Error fetching profile:', error);
-      return null;
-    }
-  }, []);
-
-  // Handle new message from incoming subscription (for conversation list updates)
-  const handleGlobalNewMessage = useCallback(async (message: RealtimeMessage) => {
-    console.log('Incoming message received:', message);
-    
-    // If this message is for the active conversation, update messages
-    if (activeConversation && message.user_id === activeConversation) {
-      setMessages(prev => {
-        const exists = prev.find(m => m.id === message.id);
-        if (exists) return prev;
-        return [...prev, message];
-      });
-    }
-    
-    // Update conversation list
-    setConversations(prev => {
-      const senderId = message.user_id;
-      const existingConversationIndex = prev.findIndex(conv => conv.id === senderId);
-      
-      if (existingConversationIndex >= 0) {
-        // Update existing conversation
-        const updatedConversations = [...prev];
-        updatedConversations[existingConversationIndex] = {
-          ...updatedConversations[existingConversationIndex],
-          last_message: message.content,
-          last_message_time: message.created_at
-        };
-        return updatedConversations;
-      } else {
-        // Add new conversation - need to fetch sender's profile
-        getProfileData(senderId).then(profile => {
-          if (profile) {
-            setConversations(currentConversations => {
-              // Check if conversation was already added by another async operation
-              const alreadyExists = currentConversations.find(conv => conv.id === senderId);
-              if (alreadyExists) return currentConversations;
-              
-              return [{
-                id: senderId,
-                participant_email: profile.email,
-                participant_name: profile.full_name || '',
-                last_message: message.content,
-                last_message_time: message.created_at,
-                unread_count: 0,
-                is_online: false
-              }, ...currentConversations];
-            });
-          }
-        });
-        
-        return prev; // Return current state while profile is being fetched
-      }
-    });
-  }, [activeConversation, getProfileData]);
-
-  // Initialize realtime chat
+  // Set up real-time chat when user logs in
   useEffect(() => {
     if (user?.id) {
+      // Create the chat instance
       realtimeChat.current = createRealtimeChat(user.id);
-      console.log(realtimeChat.current)
-      // Set user online when component mounts
-      realtimeChat.current.setPresence(true);
       
-      // Subscribe to incoming messages (where current user is receiver)
-      realtimeChat.current.subscribeToIncomingMessages(handleGlobalNewMessage);
-      
-      // Subscribe to sent message status updates
-      realtimeChat.current.subscribeToSentMessages((message) => {
-        console.log('Sent message status update:', message);
-        // Update message status if it's in the current conversation
-        if (activeConversation && 
-            (message.user_id === user.id && message.receiver_id === activeConversation)) {
-          setMessages(prev => 
-            prev.map(m => m.id === message.id ? { ...m, ...message } : m)
-          );
-        }
-      });
-      
-      // Subscribe to user presence updates globally
-      realtimeChat.current.subscribeToPresence((presence) => {
-        console.log('Presence update:', presence);
-        // Update conversation list with presence info
-        setConversations(prev => 
-          prev.map(conv => 
-            conv.id === presence.user_id 
-              ? { ...conv, is_online: presence.is_online }
-              : conv
-          )
-        );
-      });
-      
-      // Set user offline when component unmounts
+      // Cleanup when component unmounts
       return () => {
         if (realtimeChat.current) {
-          realtimeChat.current.setPresence(false);
-          realtimeChat.current.unsubscribeAll();
+          realtimeChat.current.unsubscribeFromMessages();
         }
       };
     }
-  }, [user?.id, handleGlobalNewMessage, activeConversation]);
+  }, [user?.id]);
 
-  // Load conversations when user is available
+  // Load conversations when user is ready
   useEffect(() => {
     if (user?.id) {
       loadConversations();
     }
   }, [user?.id, loadConversations]);
 
-  // Handle active conversation changes
+  // When user selects a conversation, load its messages and start listening
   useEffect(() => {
     if (activeConversation && user?.id) {
       loadMessages(activeConversation);
       subscribeToRealtimeMessages();
-      subscribeToTypingIndicators();
     }
     
+    // Cleanup when switching conversations
     return () => {
       if (realtimeChat.current) {
-        realtimeChat.current.unsubscribeAll();
+        realtimeChat.current.unsubscribeFromMessages();
       }
     };
-  }, [activeConversation, user?.id, loadMessages, subscribeToRealtimeMessages, subscribeToTypingIndicators]);
+  }, [activeConversation, user?.id, loadMessages, subscribeToRealtimeMessages]);
 
-  // Auto scroll to bottom when new messages arrive
+  // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     scrollToBottom();
   }, [messages, scrollToBottom]);
 
+  // Send a message to the current conversation partner
   const sendMessage = async () => {
+    // Make sure we have everything needed to send a message
     if (!newMessage.trim() || !activeConversation || !user?.id || !realtimeChat.current) return;
 
     const messageContent = newMessage.trim();
-    setNewMessage("");
+    setNewMessage("");  // Clear the input box
 
-    // Optimistic UI update
-    const optimisticMessage: Message = {
-      id: `temp-${Date.now()}`,
-      user_id: user.id,
-      receiver_id: activeConversation,
-      content: messageContent,
-      status: 'sent',
-      created_at: new Date().toISOString()
-    };
-
-    setMessages(prev => [...prev, optimisticMessage]);
-
-    // Send through realtime chat
+    // Send the message through our real-time chat system
+    console.log("sending message to : ", activeConversation)
     const sentMessage = await realtimeChat.current.sendMessage(activeConversation, messageContent);
+    console.log("send message to : ", activeConversation)
+
     if (sentMessage) {
-      // Replace optimistic message with real one
-      setMessages(prev => 
-        prev.map(m => 
-          m.id === optimisticMessage.id ? sentMessage : m
-        )
-      );
-    } else {
-      // Remove optimistic message if failed
-      setMessages(prev => prev.filter(m => m.id !== optimisticMessage.id));
-    }
-
-    // Stop typing indicator
-    handleTyping(false);
-  };
-
-  const handleTyping = (typing: boolean) => {
-    if (!realtimeChat.current || !activeConversation) return;
-    console.log(isTyping)
-
-    if (typing) {
-      // Clear existing timeout
-      if (typingTimeout.current) {
-        clearTimeout(typingTimeout.current);
-      }
-      
-      // Set typing indicator
-      if (!isTyping) {
-        setIsTyping(true);
-        console.log(isTyping)
-        realtimeChat.current.setTyping(activeConversation, true);
-      }
-      
-      // Auto-stop typing after 3 seconds
-      typingTimeout.current = setTimeout(() => {
-        setIsTyping(false);
-        realtimeChat.current?.setTyping(activeConversation, false);
-      }, 3000);
-    } else {
-      // Stop typing immediately
-      if (typingTimeout.current) {
-        clearTimeout(typingTimeout.current);
-      }
-      setIsTyping(false);
-      realtimeChat.current.setTyping(activeConversation, false);
+      // Add the message to our local list (it will also come through the real-time subscription)
+      setMessages(prev => [...prev, sentMessage]);
     }
   };
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setNewMessage(e.target.value);
-    
-    // Trigger typing indicator
-    if (e.target.value.trim()) {
-      handleTyping(true);
-    } else {
-      handleTyping(false);
-    }
-  };
-
+  // Start a new conversation with someone by their email
   const startNewConversation = async () => {
     if (!searchEmail.trim()) return;
 
     try {
-      // Find user by email
+      // Find the user by their email
       const { data: userData, error } = await supabase
         .from('profiles')
         .select('id, email, full_name')
@@ -432,13 +238,7 @@ export default function DashboardPage() {
         return;
       }
 
-      // Get user's online status
-      const { data: presenceData } = await supabase
-        .from('user_presence')
-        .select('is_online')
-        .eq('user_id', userData.id)
-        .single();
-
+      // Switch to this conversation
       setActiveConversation(userData.id);
       setShowNewChat(false);
       setSearchEmail("");
@@ -451,9 +251,7 @@ export default function DashboardPage() {
           participant_email: userData.email,
           participant_name: userData.full_name || '',
           last_message: '',
-          last_message_time: '',
-          unread_count: 0,
-          is_online: presenceData?.is_online || false
+          last_message_time: ''
         }, ...prev]);
       }
     } catch (error) {
@@ -461,6 +259,7 @@ export default function DashboardPage() {
     }
   };
 
+  // Show loading spinner while we load data
   if (loading) {
     return (
       <div className="flex items-center justify-center h-screen">
@@ -469,12 +268,14 @@ export default function DashboardPage() {
     );
   }
 
+  // Find the current conversation details for the header
   const activeConversationData = conversations.find(c => c.id === activeConversation);
 
   return (
     <div className="flex h-screen bg-background">
-      {/* Sidebar */}
+      {/* Left Sidebar - Conversation List */}
       <div className="w-80 border-r bg-muted/40 flex flex-col">
+        {/* Header with Messages title and + button */}
         <div className="p-4 border-b">
           <div className="flex items-center justify-between mb-4">
             <h1 className="font-semibold">Messages</h1>
@@ -487,6 +288,7 @@ export default function DashboardPage() {
             </Button>
           </div>
           
+          {/* New Chat Form (shown when + is clicked) */}
           {showNewChat && (
             <div className="space-y-2">
               <Input
@@ -508,15 +310,17 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* Conversations List */}
+        {/* List of Conversations */}
         <div className="flex-1 overflow-auto">
           {conversations.length === 0 ? (
+            // Empty state when no conversations
             <div className="p-4 text-center text-muted-foreground">
               <MessageCircle className="h-8 w-8 mx-auto mb-2 opacity-50" />
               <p className="text-sm">No conversations yet</p>
               <p className="text-xs">Click + to start a new chat</p>
             </div>
           ) : (
+            // List each conversation
             conversations.map((conv) => (
               <button
                 key={conv.id}
@@ -525,13 +329,8 @@ export default function DashboardPage() {
                   activeConversation === conv.id ? 'bg-muted' : ''
                 }`}
               >
-                <div className="flex items-center gap-2">
-                  <div className="font-medium text-sm">
-                    {conv.participant_name || conv.participant_email}
-                  </div>
-                  {conv.is_online && (
-                    <Circle className="h-2 w-2 fill-green-500 text-green-500" />
-                  )}
+                <div className="font-medium text-sm">
+                  {conv.participant_name || conv.participant_email}
                 </div>
                 <div className="text-xs text-muted-foreground">
                   {conv.participant_email}
@@ -546,7 +345,7 @@ export default function DashboardPage() {
           )}
         </div>
 
-        {/* User Info */}
+        {/* Bottom section with user info and sign out */}
         <div className="p-4 border-t">
           <div className="flex items-center justify-between">
             <div className="text-sm">
@@ -563,27 +362,21 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Chat Area */}
+      {/* Right Side - Chat Area */}
       <div className="flex-1 flex flex-col">
         {activeConversationData ? (
           <>
+            {/* Chat Header */}
             <div className="p-4 border-b">
-              <div className="flex items-center gap-2">
-                <h2 className="font-semibold">
-                  {activeConversationData.participant_name || activeConversationData.participant_email}
-                </h2>
-                {activeConversationData.is_online && (
-                  <Circle className="h-2 w-2 fill-green-500 text-green-500" />
-                )}
-              </div>
+              <h2 className="font-semibold">
+                {activeConversationData.participant_name || activeConversationData.participant_email}
+              </h2>
               <p className="text-sm text-muted-foreground">
                 {activeConversationData.participant_email}
-                {activeConversationData.is_online && (
-                  <span className="ml-2 text-green-600">Online</span>
-                )}
               </p>
             </div>
 
+            {/* Messages Area */}
             <div className="flex-1 overflow-auto p-4 space-y-4">
               {messages.map((message) => {
                 const isFromMe = message.user_id === user?.id;
@@ -600,43 +393,28 @@ export default function DashboardPage() {
                       }`}
                     >
                       <div className="break-words">{message.content}</div>
-                      <div className="flex items-center justify-between mt-1">
-                        <div className="text-xs opacity-60">
-                          {new Date(message.created_at).toLocaleTimeString([], {
-                            hour: '2-digit',
-                            minute: '2-digit'
-                          })}
-                        </div>
-                        {isFromMe && message.status && (
-                          <div className="text-xs opacity-60 ml-2">
-                            {message.status === 'sent' && '✓'}
-                            {message.status === 'delivered' && '✓✓'}
-                            {message.status === 'read' && '✓✓'}
-                          </div>
-                        )}
+                      <div className="text-xs opacity-60 mt-1">
+                        {new Date(message.created_at).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
                       </div>
                     </div>
                   </div>
                 );
               })}
               
-              {partnerTyping && (
-                <div className="flex justify-start">
-                  <div className="bg-muted p-3 rounded-lg">
-                    <div className="text-sm opacity-60">Typing...</div>
-                  </div>
-                </div>
-              )}
-              
+              {/* This invisible div helps us scroll to the bottom */}
               <div ref={messagesEndRef} />
             </div>
 
+            {/* Message Input Area */}
             <div className="p-4 border-t">
               <div className="flex gap-2">
                 <Input
                   placeholder="Type a message..."
                   value={newMessage}
-                  onChange={handleInputChange}
+                  onChange={(e) => setNewMessage(e.target.value)}
                   onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
                   className="flex-1"
                 />
@@ -647,6 +425,7 @@ export default function DashboardPage() {
             </div>
           </>
         ) : (
+          // Empty state when no conversation is selected
           <div className="flex-1 flex items-center justify-center text-muted-foreground">
             <div className="text-center">
               <MessageCircle className="h-16 w-16 mx-auto mb-4 opacity-50" />
